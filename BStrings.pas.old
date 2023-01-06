@@ -1,0 +1,282 @@
+{todo
+   last chat on text property is delimiter to be skip
+   add string functions
+     Trim, Mid
+   Add optimization lea [   +const]
+   ADD const   -> to one add const + const
+   Add const
+
+}
+unit BStrings;
+
+interface
+
+uses windows;
+
+{ !! WARNING !! you must work with WIDE STRINGS to work normaly}
+
+type
+     BTStrings = class
+     private
+        SearchRow    : longint;
+        BigString    : string;
+        aDelimiter   : char;
+        function     GetCount:longint;
+        function     GetText:string;
+        procedure    SetText(value:string);
+        function     FindPosition(i:longint):longint;
+     public
+        SearchCaseSense : boolean;
+        constructor  Create;
+        destructor   Destroy; override;
+        procedure    Clear;
+        function     Add(s:string):longint;
+        function     Get(i:longint):string;
+        procedure    Insert(in_pos:longint; s:string);
+        procedure    Put(in_pos:longint; s:string);
+        procedure    Delete(i:longint);
+        procedure    Move(old_i,new_i:longint);
+        procedure    Swap(i,j:longint);
+        function     Search(s:string):longint;
+        procedure    ResetSearch;
+        function     Find(s:string):longint;
+        property     Count:longint read GetCount;
+        property     Text:string read GetText write SetText;
+        property     Delimiter:char read aDelimiter write aDelimiter;
+        property     Strings[i:longint]:string read Get write Put;
+     end;
+
+
+
+
+
+
+implementation
+
+uses BStrTools;
+
+
+constructor  BTStrings.Create;
+begin
+  BigString  := '';
+  aDelimiter := ' ';
+  SearchRow := 1;
+  SearchCaseSense := true;
+end;
+
+
+destructor   BTStrings.Destroy;
+begin
+   inherited;
+end;
+
+
+procedure    BTStrings.Clear;
+begin
+   BigString := '';
+end;
+
+
+function     BTStrings.Add(s:string):longint;
+begin
+   s := s + #3;  {  3 ^C  ETX  end of text }
+   BigString := BigString + s;
+   Add := Count;
+end;
+
+
+function     BTStrings.Get(i:longint):string;
+var j:longint;
+    s:string;
+begin
+   s := '';
+   j := FindPosition(i);
+   if j > 0 then
+   begin
+      while BigString[j] <> #3 do
+      begin
+         s := s + BigString[j];
+         inc(j);
+      end;
+   end;
+   Get := S;
+end;
+
+
+procedure    BTStrings.Insert(in_pos:longint; s:string);
+var i,j:longint;
+begin
+   s := s + #3;
+   i := FindPosition(in_pos); { from index to str pos }
+   if i  = 0 then
+   begin
+      dec(in_pos);
+      j := Count;
+      if in_pos  > j then
+      begin
+         for i := 1 to (in_pos - J) do BigString := BigString + #3;
+      end else begin
+         if in_pos = j then BigString := BigString + s;
+      end;
+   end else begin
+      BigString := InsertString(BigString,i,s);
+   end;
+end;
+
+
+procedure    BTStrings.Delete(i:longint);
+var j,k,l:longint;
+    s:string;
+begin
+   s := '';
+   j := FindPosition(i);
+   k := FindPosition(i+1);
+   if (j > 0) then
+   begin
+      if  j > 1 then for l := 1 to (j - 1) do s := s + BigString[l];
+      if  k > 0 then for l := k to length(BigString) do s := s + BigString[l];
+      BigString := s;
+   end;
+end;
+
+
+procedure    BTStrings.Move(old_i,new_i:longint);
+var s1,s2:string;
+begin
+   if old_i <= 0 then Exit;
+   if new_i <= 0 then Exit;
+   s1 := Get(old_i);
+   s2 := Get(new_i);
+   Put(old_i,s2);
+   Put(new_i,s1);
+end;
+
+
+function     BTStrings.GetCount:longint;
+var i,res:longint;
+begin
+   res := 0;
+   if Length(BigString) > 0 then
+      for i := 1 to length(BigString) do
+         if BigString[i] = #3 then inc(res);
+   GetCount := res;
+end;
+
+
+function     BTStrings.GetText:string;
+var s,s1:string;
+    i:longint;
+begin
+   s := ReplaceChar(BigString,#3,aDelimiter);
+   if delimiter = #13 then { add #10 after #13 }
+   begin
+      s1 := '';
+      if length(s) > 0 then
+        for i := 1 to length(s) do if s[i] = #13 then s1 := s1 + #13+#10
+                                                 else s1 := s1 + s[i];
+      s := s1;                                           
+   end;
+   GetText := s;
+end;
+
+
+procedure    BTStrings.SetText(value:string);
+var s:string;
+    i:longint;
+begin
+   s := value;
+   if Delimiter = #13 then { remove #10 }
+   begin
+      s := '';
+      if length(value) > 0 then
+        for i := 1 to length(value) do if value[i] <> #10 then s := s + value[i];
+   end;
+   BigString := ReplaceChar(s,aDelimiter,#3);
+   if BigString = '' then BigString := #3
+   else if BigString[length(BigString)] <> #3 then BigString := BigString + #3;
+end;
+
+
+function     BTStrings.FindPosition(i:longint):longint;
+var res,j,k,d:longint;
+begin
+   res := 0;
+   j := length(BigString);
+   if  j > 0 then
+   begin
+      d := 1;
+      for k := 1 to j do
+      begin
+         if i = d then begin res := k; break; end;
+         if BigString[k] = #3 then inc(d);
+      end;
+   end;
+   FindPosition := res;
+end;
+
+
+procedure    BTStrings.Put(in_pos:longint; s:string);
+begin
+   Delete(in_pos);
+   Insert(in_pos,s);
+end;
+
+
+function     BTStrings.Find(s:string):longint;
+var res,i,j:longint;
+    s1:string;
+begin
+   res := 0;
+   j := length(BigString);
+   i := 1;
+   if j > 0 then
+   begin
+      repeat
+         s1 := '';
+         while BigString[i] <> #3 do
+         begin
+            s1 := s1 + BigString[i];
+            inc(i);
+         end;
+         inc(res);
+      until (i >= (j - 1)) or (s = s1);
+   end;
+   Find := res;
+end;
+
+
+procedure    BTStrings.Swap(i,j:longint);
+var si,sj:string;
+begin
+   if i > count then Exit;
+   if j > count then Exit;
+   si := get(i);
+   sj := get(j);
+   Put(i,sj);
+   Put(j,si);
+end;
+
+
+function     BTStrings.Search(s:string):longint; // case sensitive
+var res : longint;
+    St:string;
+begin
+   res := 0;
+   if not SearchCaseSense then S := UpperCase(S);
+   repeat
+      St := Get(SearchRow);
+      if not SearchCaseSense then St := UpperCase(St);      
+      if Pos(s,st) <> 0 then res := SearchRow;
+      inc(SearchRow);
+   until (res <> 0) or ( SearchRow > Count);
+   Search := res;
+end;
+
+
+procedure    BTStrings.ResetSearch;
+begin
+   SearchRow := 1;
+end;
+
+
+end.
