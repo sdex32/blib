@@ -1,0 +1,373 @@
+unit BLargeDataRec;
+
+interface
+
+var wreads,wwrites:longword;  // for debug
+
+
+//!CAUTION! can reach exception out of memory 
+
+type  BTLDR_Cache = record
+         Chain :longword;
+         Page  :longword;
+      end;
+
+      BTLDR_State = record
+         Next :pointer;
+         aCache : array [0..127] of BTLDR_Cache;
+         aDataSize :longword;
+         aDataInChunk :longword;
+         aChunksCount :longword;
+         aRecCount :longword;
+         aRecCapacity :longword;
+         aCacheGarbageC :longword;
+         aCacheGarbageN :longword;
+         aCacheUsed :longword;
+         aMemChunk :pointer;
+         aMemoryChunk :pointer;  
+         aCurChunk :longword;
+         aFlushed :boolean;
+         aFileName :string[80];
+      end;
+      PBTLDR_State = ^BTLDR_State;
+
+      BTLargeDataRecord = class
+         private
+            aCacheBuf :pointer;     // 1Gb global memory
+            aCacheCapInc :boolean;  // Write New Block Capacity increase
+            aCacheMemory : boolean;
+            aChunkSize :longword;   // const chunk size
+            aStates :PBTLDR_State;
+            aCurState :PBTLDR_State;
+            function    _ReadChunk(chnk:longword):boolean;
+            function    _WriteChunk(chnk:longword):boolean;
+            function    _GetRecCount:longword;
+
+         public
+            constructor Create(use_cache:boolean);
+            destructor  Destroy; override;
+            function    Init(const FName:string; DataSize,FirstCapacity:longword; var LDR_ID:longword):boolean; //true ok
+
+            function    NewRec:longword; //index
+            function    GetRec(indx:longword):pointer;
+
+            function    Flush:boolean;
+            function    Refresh(LDR_ID:longword):boolean;
+
+            property    GetRecCount :longword read _GetRecCount;
+      end;
+
+
+implementation
+
+uses BFileTools, BMemInfo;
+
+// !!WARNING !! dont change this values
+// optimal page swap size $800000;  = 8388608    8192*1024
+// cache memory 1Gb 1024*1024*1024 =  1073741824
+// if you change this you have to change aCache !!! :(
+
+const ChunkSize = 8192*1024;      // 8Mb  $800000;
+      CacheSize = 1024*1024*1024; // 1Gb
+
+//------------------------------------------------------------------------------
+constructor BTLargeDataRecord.Create(use_cache:boolean);
+begin
+   //aCurChunk := 0;
+
+   aStates := nil;
+   //aMemChunk := nil;
+   aChunkSize := ChunkSize;;
+
+   aCacheMemory := false;
+   aCacheBuf := nil;
+   if SystemInfo_TotalPhysMemMB > 3000 then // you must have good machine
+   begin
+      if use_cache then ReallocMem(aCacheBuf, CacheSize);
+      if aCacheBuf <> nil then aCacheMemory := true;
+   end;
+end;
+
+//------------------------------------------------------------------------------
+destructor  BTLargeDataRecord.Destroy;
+var a:PBTLDR_State;
+begin
+//   if aMemChunk <> nil then ReallocMem(aMemChunk,0);
+   if aCacheBuf <> nil then ReallocMem(aCacheBuf,0);
+   while (aStates<>nil) do
+   begin
+      FileDelete(aStates.aFileName);
+      a := PBTLDR_State(aStates.Next);
+      if aStates.aMemChunk <> nil then ReallocMem(aStates.aMemChunk,0);
+      ReallocMem(aStates,0);
+      aStates := a;
+   end;
+   Inherited;
+end;
+
+//------------------------------------------------------------------------------
+function    BTLargeDataRecord._ReadChunk(chnk:longword):boolean;
+var i,p,f :longword;
+    m :pointer;
+begin
+   Result := false;
+   with aCurState^ do
+   begin
+      if aCacheMemory then
+      begin
+         p := 0;
+         for i := 0 to 127 do
+         begin
+            if aCache[i].page = chnk then begin p := i+1; break; end;
+         end;
+         if p = 0 then // not found must be read from disk
+         begin
+            if aCacheUsed < 128 then
+            begin // i have free space
+               inc(aCacheUsed);
+               p := aCacheUsed-1;
+            end else begin
+               // free first   write to disk oldest block
+               p := aCacheGarbageC-1;
+               f := aCache[p].page-1;
+               m := pointer(longword(aCacheBuf) + p*ChunkSize);
+               if not FileWriteBlock(aFileName,f*aChunkSize,M,aChunkSize) then Exit;
+               inc(wwrites);
+               aCacheGarbageC := aCache[p].Chain + 1; // next to be free
+            end;
+            inc(aCacheGarbageN);
+            if aCacheGarbageN = 129 then aCacheGarbageN := 1;
+            aCache[p].page := chnk;
+            aCache[p].Chain := aCacheGarbageN;
+            aMemoryChunk := pointer(longword(aCacheBuf) + (p)*ChunkSize);
+            if not FileReadBlock(aFileName,(chnk-1)*aChunkSize,aMemoryChunk,aChunkSize) then exit;
+            inc(wreads);
+         end else begin
+            aMemoryChunk := pointer(longword(aCacheBuf) + (p-1)*ChunkSize);
+         end;
+         Result := true;
+      end else begin
+         inc(wreads);
+         Result := FileReadBlock(aCurState.aFileName,(chnk-1)*aChunkSize,aMemChunk,aChunkSize);
+      end;
+   end;
+end;
+//------------------------------------------------------------------------------
+function    BTLargeDataRecord._WriteChunk(chnk:longword):boolean;
+var i,p :longword;
+begin
+//   Result := false;
+   with aCurState^ do
+   begin
+      if aCacheMemory then
+      begin
+         p := 0;
+         for i := 0 to 127 do if aCache[i].page = chnk then begin p := i+1; break; end;
+         // new chunk force write
+         if (p = 0) and (aCacheCapInc) then
+         begin
+            Result :=  FileWriteBlock(aFileName,(chnk-1)*aChunkSize,aMemChunk,aChunkSize);
+            inc(wwrites);
+         end else Result := true; // ok in memory
+      end else begin
+         inc(wwrites);
+         Result := FileWriteBlock(aFileName,(chnk-1)*aChunkSize,aMemChunk,aChunkSize);
+      end;
+   end;
+end;
+
+//------------------------------------------------------------------------------
+function    BTLargeDataRecord._GetRecCount:longword;
+begin
+   Result := 0;
+   if aCurState <> nil then Result := aCurState.aRecCount;
+end;
+
+//------------------------------------------------------------------------------
+function    BTLargeDataRecord.Init(const FName:string; DataSize,FirstCapacity:longword; var LDR_ID:longword):boolean; //true ok
+var i,j : longword;
+    a,p:PBTLDR_State;
+begin
+   Result := false; //fail
+   Flush; // flush current state;
+
+   // create ne state
+   p := nil;
+   ReallocMem(p,sizeof(BTLDR_State));
+   if p = nil then Exit;
+   LDR_ID := longword(p);
+   p.Next := nil;
+   // link it
+   if aStates <> nil then
+   begin
+      a := aStates;
+      while(a.Next <> nil) do a := a.Next;
+      a.Next := p;
+   end else aStates := p;
+   aCurState := p;
+
+   with aCurState^ do
+   begin
+
+      aCurChunk := 0;
+      aRecCount := 0;
+      aCacheGarbageN := 0;
+      aCacheGarbageC := 1;
+      aCacheCapInc := false;
+      aFlushed := false;
+
+      aFileName := FName;
+      if FileExist(aFileName) then FileDelete(aFileName);
+
+      aDataSize := DataSize;
+      if aDataSize > aChunkSize then Exit;
+      aDataInChunk := aChunkSize div aDataSize;  // How many data rec in one chunk
+      aChunksCount := (FirstCapacity div aDataInChunk) + 1; // How many i will need for first time
+      aRecCapacity := FirstCapacity;
+
+      for i:= 0 to 127 do
+      begin
+         aCache[i].Chain := 0; // free al pages      
+         aCache[i].Page := 0; // free al pages
+      end;
+      aCacheUsed := 0;
+
+      if FileExist(aFileName) then Exit; // file still exist
+
+      aMemChunk := nil;
+      ReallocMem(aMemChunk, aChunkSize);
+      if aMemChunk <> nil then
+      begin
+         FillChar(aMemChunk^,aChunkSize,0);
+         aMemoryChunk := aMemChunk;  // use aMemoryChunk to point inside cache
+         aCacheCapInc := true;
+         for i := 1 to aChunksCount do
+         begin
+            if not _WriteChunk(i) then
+            begin
+               aCacheCapInc := false;
+               exit;
+            end;
+         end;
+         aCacheCapInc := false;
+         if aCacheMemory then
+         begin // fill cache buffer        //todo meaby no need to slow use dynamics??
+            if aChunksCount <= 128 then j := aChunksCount
+                                   else j := 128;
+            for i := 1 to j do if not _ReadChunk(i) then exit;
+         end;
+         aCurChunk := 1;
+         if not _ReadChunk(aCurChunk) then exit;
+         Result := true;
+      end;
+   end;
+end;
+
+//------------------------------------------------------------------------------
+function    BTLargeDataRecord.NewRec:longword; //index
+var p:pointer;
+begin
+   Result := 0;
+   if aCurState <> nil then with aCurState^ do
+   begin
+      aFlushed := false;
+      if (aRecCount + 1) > aRecCapacity then
+      begin
+         // add one more chunk
+         aCacheCapInc := true;
+         inc(aChunksCount);
+         if not _WriteChunk(aChunksCount) then exit;
+         aRecCapacity := aRecCapacity + aDataInChunk;
+         aCacheCapInc := false;
+      end;
+      inc(aRecCount);
+      Result := aRecCount;
+      p := GetRec(Result);
+      if p <> nil then
+      begin
+         FillChar(p^,aDataSize,0); // reset new element
+      end else Result := 0;
+   end;
+end;
+
+//------------------------------------------------------------------------------
+function    BTLargeDataRecord.GetRec(indx:longword):pointer;
+var chunk:longword;
+begin
+   Result := nil;
+   if aCurState <> nil then with aCurState^ do
+   begin
+      aFlushed := false;
+      if (Indx = 0) or (indx > aRecCount) or (aCurChunk = 0) then Exit;
+      chunk := (indx div aDataInChunk) + 1;
+      if chunk <> aCurChunk then
+      begin
+         if not _WriteChunk(aCurChunk) then exit;
+         if not _ReadChunk(Chunk) then exit;
+         aCurChunk := Chunk;
+      end;
+      Result := pointer(longword(aMemoryChunk) + ((indx-1) mod aCurState.adataInChunk)*aCurState.aDataSize);
+   end;
+end;
+
+//------------------------------------------------------------------------------
+function    BTLargeDataRecord.Flush:boolean;
+var  i,j:longword;
+begin
+   Result := false;
+   if aCurState <> nil then with aCurState^ do
+   begin
+      if not aFlushed then
+      begin
+         for i := 0 to 127 do
+         begin
+            j := aCache[i].page;
+            if j <> 0 then
+            begin  // put this page in Cache
+               aMemoryChunk := pointer(longword(aCacheBuf) + (i)*ChunkSize);
+               if not FileWriteBlock(aFileName,(j-1)*aChunkSize,aMemoryChunk,aChunkSize) then exit;
+            end;
+         end;
+         Result := true;
+         aFlushed := true;
+      end else Result := true;
+   end;
+end;
+
+//------------------------------------------------------------------------------
+function    BTLargeDataRecord.Refresh(LDR_ID:longword):boolean;
+var a:PBTLDR_State;
+    i,j:longword;
+begin
+   Result := false;
+   a := aStates;
+   while (a <> nil) do
+   begin
+      if longword(a) = LDR_ID then Result := true;
+      a := a.Next;
+   end;
+   if Result then
+   begin
+      Flush; // flush cur state
+      Result := false; // for exit
+      aCurState := pointer(LDR_ID);
+      with aCurState^ do
+      begin
+         for i := 0 to 127 do
+         begin
+            j := aCache[i].page;
+            if j <> 0 then
+            begin  // put this page in Cache
+               aMemoryChunk := pointer(longword(aCacheBuf) + (i)*ChunkSize);
+               if not FileReadBlock(aFileName,(j-1)*aChunkSize,aMemoryChunk,aChunkSize) then exit;
+            end;
+         end;
+         aFlushed := false;
+         Result := true;
+      end;
+   end;
+end;
+
+
+
+end.

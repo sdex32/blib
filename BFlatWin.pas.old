@@ -1,0 +1,1774 @@
+unit BFlatWin;
+{todo
+   Timer & Joy out from this module
+   only windows relative
+
+}
+
+
+{$DEFINE USE_BCANVAS}
+{ $ DEFINE USE_LOCALTIMER}
+
+{$APPTYPE GUI }
+
+/// if FPC is not defined DELPHI usage
+{$IFDEF FPC }
+{$MODE DELPHI }
+
+{*********** CODE GENRATION ****************}
+{$DEBUGINFO OFF }
+{$ASMMODE INTEL }
+{ $ STACKFRAMES OFF } // after version 1.0.10 this is auto
+{$GOTO ON }
+{$S- } {** stop stack check ** }
+{$INLINE ON }
+{$MACRO ON }
+{$SMARTLINK ON }
+{$TYPEINFO ON }
+
+{*********** OUTPUT MESSAGES ***************}
+{$HINTS ON }
+{$NOTES ON }
+{$WARNINGS ON }
+
+{$ELSE }
+{**** DELPHI }
+{$APPTYPE GUI}
+{ $ DEBUGINFO OFF}
+{$OPTIMIZATION ON}
+{$RANGECHECKS OFF}
+{$OVERFLOWCHECKS OFF}
+
+{$ENDIF}
+
+
+interface
+
+   uses  {$IFDEF USE_BCANVAS}
+           BCanvas,
+         {$ENDIF}
+         windows
+         {$IFDEF FPC}
+           ;
+         {$ELSE}
+           ,messages,shellapi; //TODO ISTHAT too old
+         {$ENDIF}
+
+
+function  EnterWindows:dword;
+procedure LeaveWindows;
+procedure RunFlatWindows(callproc:dword);
+procedure Run;
+procedure ExitProgram;
+
+function  GetWndMessage(a:dword):dword;
+function  GetPaintHdc:HDC;
+function  GetHWnd:HWND;
+procedure SetWndHook(hooknum,hookptr:dword);
+procedure SetWindowCaption(Caption:pchar);
+procedure SetWindowPosition(Xpos,Ypos:longint);
+procedure SetWindowSize(Xlng,Ylng:longint);
+procedure SetWindowClientSize(Width,Height:longint);
+procedure GetWindowClientSize(var Width,Height:longint);
+procedure SetWindowMaximaze;
+procedure SetWindowBorder(Border:dword);
+procedure SetWindowCursor(Cursor:dword);
+procedure SetWindowIcon(Icon:Dword);
+procedure SetWindowBackground(BK:Dword);
+function  GetScreenXlng:dword;
+function  GetScreenYlng:dword;
+function  GetScreenBPP:dword;
+procedure RePaintWindow;
+
+
+function  KeyHit(VK:dword):dword;
+function  TestKey(akey:dword):boolean;
+function  KeyPressed:boolean;
+function  GetKey:word;
+function  WaitKeyGet:word;
+procedure WaitKey;
+procedure FlushKeys;
+
+function  Mouse_GetXpos:dword;
+function  Mouse_GetYpos:dword;
+function  Mouse_GetButtons:dword;
+procedure Mouse_Get(var Buttons,Xpos,Ypos:dword);
+procedure Mouse_GetDiff(var Xdif,Ydif:longint);
+procedure Mouse_SetPosition(Xpos,Ypos:dword);
+
+{$IFDEF USE_LOCALTIMER}
+function  BeginTimer(Time_delay:dword):dword;
+procedure WaitTimer(The_timer:dword);
+procedure Delay(Delay_time:dword);
+{$ENDIF}
+
+
+type proc = procedure;
+     ptrtobool = ^boolean;
+     ptrtoint = ^longint;
+     ptrtostring = ^string;
+
+function  EditBox(Xpos,Ypos,Xlng,Ylng:dword; InitText: string; aText:ptrtostring):dword;
+function  Button(Xpos,Ypos,Xlng,Ylng:dword; BtnName: string; BtnProc:proc):dword;
+function  CheckBox(Xpos,Ypos,Xlng,Ylng:dword; BtnName: string; BoolPtr:ptrtobool; InitValue:boolean):dword;
+function  LabelBox(Xpos,Ypos,Xlng,Ylng:dword; BtnName: string):dword;
+function  ScrollBar(Xpos,Ypos,Xlng,Ylng,Min,Max,Pos,HV:longint; BtnProc:proc; IntPtr:ptrtoint):dword;
+procedure ControlText(Hand:dword; NewText: string);
+
+{$IFDEF USE_BCANVAS}
+function  CreateDrawCanvas(Xpos,Ypos,Xlng,Ylng:longint; Framed:boolean; FrameColor:dword):BTCanvas;
+{$ENDIF}
+
+
+implementation
+(*//////////////////////////////////////////////////////////////////////////////
+////////////////////////////////////////////////////////////////////////////////
+*)
+
+
+type
+   InputDevice_Func = record
+      _TestKey : function(key:dword):boolean;
+      _KeyPressed : function:boolean;
+      _GetKey : function:word;
+      _FlushKeys : procedure;
+
+      _Mouse_GetXpos : function:dword;
+      _Mouse_GetYpos : function:dword;
+      _Mouse_GetButtons : function:dword;
+      _Mouse_Get : procedure(var Buttons,Xpos,Ypos:dword);
+      _Mouse_GetDiff : procedure(var Xdif,Ydif:longint);
+   end;
+
+{$IFDEF USE_BCANVAS }
+   PDrawControl = ^DrawControl;
+   DrawControl = record
+     Next : PDrawControl;
+     bmp  : BTBitmap;
+     Xpos : longint;
+     Ypos : longint;
+     Frm  : longword;
+   end;
+{$ENDIF}
+
+var
+{$IFDEF USE_BCANVAS}
+     Draws      : PDrawControl;
+{$ENDIF}     
+     InputFunc  : InputDevice_Func;
+     EnterW     : dword;              // Window mode was entered
+     mainProc   : procedure;  // Ptr to main call function
+     h_Wnd      : HWND;               // Handle to main window
+     Wnd        : HWND;               // Handle to main window
+     Finish     : boolean;            // marker to finish program
+     AppActive  : boolean;            // if TRUE app is active
+     uTimer     : dword;              // Handle to system timer
+     aCursor    : dword;              // cursor type
+     pdc        : HDC;                // on Paint HDC
+     aBackGr    : dword;              // WM_BACKGROUND to stop flashing
+     aBrush     : dword;              // Background brush
+     winDC      : dword;
+
+
+     cmd_w      : dword;              // global to transfer W_param
+     cmd_d      : dword;              //  --//--            L_param
+     cmd_h      : dword;              //  --//--            Hwnd
+     cmd_m      : dword;              //  --//--            Message
+
+
+
+     iostr:Record                    // main io structure KBD & Mouse
+       msd_Buttons :dword;           // mouse button status
+       msd_Xpos    :dword;           // mouse Xpos
+       msd_Ypos    :dword;           // mouse Ypos
+       msd_Xdiff   :longint;         // mouse X diff
+       msd_Ydiff   :longint;         // mouse Y diff
+       kbdBegin    :dword;           // local teil begin pointer
+       kbdEnd      :dword;           // local teil end pointer
+       kbdBuff     :array [0..32] of word;  // local keyboard tail
+       keyscanmap  :array [0..128] of byte; // scan code map
+       keyhitc     :byte;            // marker scan code is hit
+     end;
+                                     // Event CallBacks
+     OnIdle     :procedure;          // on Idle
+     OnMouse    :procedure;          // on Mouse
+     OnClick    :procedure;          // on Mouse click
+     OnKey      :procedure;          // on Key down
+     OnTimer    :procedure;          // on Timer
+     OnQuit     :procedure;          // on Quit
+     OnPaint    :procedure;          // on Paint
+     OnActive   :procedure;          // on App Active
+     OnDeActive :procedure;          // on App UnActive
+     OnSize     :procedure;          // on Window resize
+     OnCommand  :procedure;          // on wm_Command
+     OnCreate   :procedure;          // on Create
+     OnOther    :procedure;          // on Other event bypass all messages
+
+
+procedure __Init_All;  forward;
+procedure __Close_All; forward;
+
+
+
+(*//////////////////////////////////////////////////////////////////////////////
+////////////////////////////////////////////////////////////////////////////////
+///  WNDSYS (KERNEL)     versin 2.0      last touch 01.02.2005
+///
+///  < <    K E R N E L   > >
+///
+
+export
+   EnterWindows,
+   ExitWindows,
+   RunFlatWindows,
+   Run,
+   ExitProgram,
+
+to implementation
+
+function  EnterWindows:dword;
+ external 'wndsys.dll' name 'EnterWindows';
+
+procedure ExitWindows;
+ external 'wndsys.dll' name 'ExitWindows';
+
+procedure RunFlatWindows(callproc:dword);
+ external 'wndsys.dll' name 'RunFlatWindows';
+
+procedure Run;
+ external 'wndsys.dll' name 'Run';
+
+procedure ExitProgram;
+ external 'wndsys.dll' name 'ExitProgram';
+
+*)
+
+procedure error(a:dword);
+begin
+end;
+
+
+procedure FlushMessages;
+var
+   LoopMe : boolean;
+   aMSG   : MSG;
+Begin
+
+   if Finish then exit;
+
+   { Stay in this loop while not active or minimized }
+{$IFDEF FPC }
+   while (not AppActive) and GetMessage(@aMSG,0,0,0) do
+{$ELSE}
+   while (not AppActive) and GetMessage(aMSG,0,0,0) do
+{$ENDIF}
+   begin
+      If aMSG.Message = WM_Quit then
+      begin
+//         LoopMe := false;
+         Finish := true;
+      end;
+      TranslateMessage(aMSG);
+      DispatchMessage (aMSG);
+   end;
+
+   if Finish then begin __Close_all; ExitProcess(0); end;
+   LoopMe := true;
+
+   While LoopMe do
+   begin
+      if PeekMessage(aMSG,0,0,0,PM_REMOVE or PM_NOYIELD) then
+      begin
+         If aMSG.Message = WM_Quit then
+         begin
+             LoopMe := false;
+             Finish := true;
+         end;
+         TranslateMessage(aMSG);
+         DispatchMessage (aMSG);
+      end else begin
+         { IDLE }
+         LoopMe := false;
+      end;
+   end;
+   if Finish then begin __Close_all; ExitProcess(0); end;
+End;
+
+
+
+procedure nopProc;
+begin
+end;
+
+
+
+function _WindowProc(aWindow: HWnd; AMessage: UINT; WParam : WPARAM;
+                    LParam: LPARAM): LRESULT; stdcall;
+var
+{$IFDEF USE_BCANVAS}
+    Draw,dd : PDrawControl;
+{$ENDIF}    
+    res : LRESULT;
+    i:longword;
+    X,Y:longint;
+    fr,pen,old_pen:dword;
+    ps : paintstruct;
+    pr : procedure;
+    bo : ^boolean;
+    ip : ^longint;
+    Scroll : TSCROLLINFO;
+//    bhwnd : longword;
+//    rec:TRect;
+//    old:Thandle;
+begin
+   res := 0;
+   cmd_h := aWindow;
+   cmd_m := aMessage;
+   cmd_w := wParam;
+   cmd_d := lParam;
+
+   OnOther;
+
+   case aMessage of
+   WM_COMMAND:
+      begin
+        // wParam and FF = cid
+        if lParam <> 0 then
+        begin
+          if GetProp(lParam,'fw_cbf1') <> 0 then
+          begin
+             if (wParam and $FF ) = 1 then // Button
+             begin
+               if GetProp(lParam,'fw_cbf1') < 0 then
+               begin
+                  pr := pointer(GetProp(lParam,'fw_cbf1'));
+                  pr;
+               end;
+             end;
+             if (wParam and $FF ) = 2 then // CheckBox
+             begin
+               bo := pointer(GetProp(lParam,'fw_cbf1'));
+               if dword(bo) <> 0 then
+               begin
+                  if (SendMessage(lParam, BM_GETCHECK, 0, 0) = BST_CHECKED ) then bo^ := true
+                                                                             else bo^ := false;
+               end;
+             end;
+          end;
+        end;
+        if (wParam and $FF) <> 5 then SetFocus(H_wnd); // On EditBox getFocus
+      end;
+   WM_ACTIVATE:
+      begin
+         if (wParam = WA_ACTIVE) or (wParam = WA_CLICKACTIVE) then
+         begin
+//todo            if m_bServerRunning then WaveOutRestart(m_hWaveOut);
+            AppActive := true;
+//todo            AfterActive := 1;
+//todo            SetWinCursor(aCursor);
+            OnActive;
+         end ;
+         if wParam = WA_INACTIVE then
+         begin
+//todo            if m_bServerRunning then WaveOutPause(m_hWaveOut);
+            AppActive := false;
+            OnDeActive;
+         end;
+      end;
+
+
+   WM_CREATE:
+      begin
+         { make some initialization }
+//         InitializeCriticalSection(protect_devices);
+         h_wnd := awindow;  { set it only for this call }
+         onCreate;
+         uTimer := SetTimer(h_wnd,1,62,nil); {// 1/16 from second  }
+         SetFocus(h_wnd);
+      end;
+
+   WM_SYSCOMMAND:
+      begin
+         if wparam = SC_CLOSE then
+         begin
+           PostMessage(h_wnd,WM_CLOSE,0,0);
+           res := 1;
+         end;
+      end;
+
+   WM_CLOSE:  { begin the end story }
+      begin
+         DestroyWindow(h_Wnd); { this will cal WM_DESTROY }
+         res := 1;
+      end;
+
+   WM_DESTROY: { This the last message }
+      begin
+         onQuit;
+{$IFDEF USE_BCANVAS}
+         Draw := Draws;
+         while Draw <> nil do
+         begin
+            dd := Draw;
+            Draw.bmp.Free;
+            Draw := Draw.Next;
+            freemem(dd,sizeof(DrawControl));
+         end;
+{$ENDIF}
+         KillTimer(h_wnd,uTimer);
+         PostQuitMessage(0); { send to close WM_QUIT}
+         res := 1;
+      end;
+
+   {// Turn off the cursor since this is a full-screen app }
+   WM_SETCURSOR:
+      begin
+        if LOWORD(lParam) = HTCLIENT then
+         begin
+            SetWindowCursor(aCursor);
+            res := 1;
+         end;
+      end;
+
+
+   WM_TIMER:
+      begin
+         if wParam = 1 then  // Initialize timer
+         begin
+            OnTimer;  //BUG
+            // if still true time out
+         end;
+      end;
+
+   WM_PAINT:
+      begin
+         // NORMAL
+         pdc:=BeginPaint(h_Wnd,ps);
+{$IFDEF USE_BCANVAS }
+         Draw := Draws;
+         while Draw <> nil do
+         begin
+            X := Draw.Xpos;
+            Y := Draw.Ypos;
+            if (Draw.Frm and $80000000) <> 0 then
+            begin // Draw frame
+               pen := createPen(ps_SOLID,0,Draw.Frm and $FFFFFF);
+               old_pen := SelectObject(pdc,pen);
+               Windows.MoveToEx(pdc, X-1          , Y-1,    nil);
+               Windows.LineTo(  pdc, X + Draw.bmp.Xlng , Y-1);
+               Windows.LineTo(  pdc, X + Draw.bmp.Xlng , Y + Draw.bmp.Ylng );
+               Windows.LineTo(  pdc, X-1          , Y + Draw.bmp.Ylng );
+               Windows.LineTo(  pdc, X-1          , Y-1);
+               DeleteObject(SelectObject(pdc,old_pen));
+            end;
+            bitblt(pdc,X,Y,Draw.bmp.Xlng,Draw.bmp.Ylng,Draw.bmp.GetDC,0,0,SRCCOPY);
+            Draw.bmp.ReleaseDC;
+            Draw := Draw.Next;
+         end;
+{$ENDIF}
+
+
+         OnPaint;
+//todo         The_Display.RePaint;
+         EndPaint(h_Wnd,ps);
+      end;
+
+   WM_ERASEBKGND:
+      begin
+         if aBackGr = 1 then Res := 1 // I handle that to stop flicking;
+          //else begin
+             //pdc:=BeginPaint(h_Wnd,ps);
+            // repeat
+             //   bhwnd := getwindow(h_Wnd,GW_CHILD);
+            //    if bhwnd <> 0 then
+            //    begin
+            //      GetWindowRect(bhwnd,rec);
+            //      ExcludeClipRect(pdc, rec.Left , rec.Top , rec.Right, rec.Bottom);
+            //    end;
+            // until bhwnd = 0 ;
+            // EndPaint(h_Wnd,ps);
+          //end;
+      end;
+
+   WM_SIZE:
+      begin
+         OnSize;
+      end;
+
+
+
+
+{///////////  used messages }
+
+   {-=* MOUSE *=-}
+
+   WM_MOUSEMOVE:
+      begin
+         {//fwKeys = wParam;       // key flags }
+
+         if (wParam and MK_LBUTTON) > 0 then iostr.msd_Buttons := iostr.msd_Buttons or 1;
+         if (wParam and MK_RBUTTON) > 0 then iostr.msd_Buttons := iostr.msd_Buttons or 2;
+         X := dword(lParam and $FFFF);  { horizontal position of }
+         Y := dword(lParam shr 16);     { vertical }
+         iostr.msd_Xdiff := longint(X) - longint(iostr.msd_Xpos);
+         iostr.msd_Ydiff := longint(Y) - longint(iostr.msd_Ypos);
+         iostr.msd_Xpos := X;
+         iostr.msd_Ypos := Y;
+           { onMouse trap }
+         onMouse;
+//         Res := 1;
+      end;
+   WM_LBUTTONDOWN:
+      begin
+         OnClick;
+         iostr.msd_Buttons  := iostr.msd_Buttons or 1;
+//         Res := 1;
+      end;
+   WM_LBUTTONUP:
+      begin
+         iostr.msd_Buttons  := iostr.msd_Buttons and 2;
+//         Res := 1;
+      end;
+   WM_RBUTTONDOWN:
+      begin
+         iostr.msd_Buttons := iostr.msd_Buttons or 2;
+//         Res := 1;
+      end;
+   WM_RBUTTONUP:
+      begin
+         iostr.msd_Buttons := iostr.msd_Buttons and 1;
+//         Res := 1;
+      end;
+
+   {-=* KEY *=-}
+
+
+   WM_SYSKEYDOWN:
+       begin
+//todo            alt_key:=true;
+       end;
+
+   WM_KEYDOWN:
+      begin
+           {// input key value in KBD tail}
+           i := ( iostr.kbdbegin + 1 ) and 31;
+           if  i <> iostr.kbdend then
+           begin
+              iostr.kbdbuff[iostr.kbdbegin] := wParam;
+              iostr.kbdbegin := i;
+           end;
+           { onKeyboard; }
+         iostr.keyscanmap[(lParam shr 16) and $7F ] := 1;
+         iostr.keyhitc := 1;
+           { onKey trap }
+         OnKey;
+//         Res := 1;
+      end;
+   WM_KEYUP:
+      begin
+//todo        case wParam of
+//todo           VK_CONTROL: ctrl_key:=false;
+//todo           VK_SHIFT  : shift_key:=false;
+//todo        end;
+
+        iostr.keyscanmap[(lParam shr 16) and $7F ] := 0;
+        iostr.keyhitc := 0;
+//        Res := 1;
+      end;
+
+    WM_VSCROLL,
+    WM_HSCROLL:
+      begin
+        if lParam <> 0 then
+        begin
+         //MessageBox(0,'ascxasc,','ascsa',mb_ok);
+           Scroll.cbSize := sizeof(Scroll);
+           Scroll.fMask := SIF_POS or SIF_RANGE;
+
+           GetScrollInfo(lParam,SB_CTL,Scroll);
+
+           y :=(Scroll.nMax - Scroll.nMin + 1) div 10;
+           x := Scroll.nPos;
+       //  MessageBox(0,pchar(tostr(x)),'ascsa',mb_ok);
+              case loWord(wParam) of
+               SB_LINEUP: begin
+                             dec(x);
+                             if x < longint(Scroll.nMin) then x := Scroll.nMin;
+                          end;
+               SB_LINEDOWN: begin
+                             inc(x);
+                             if x > longint(Scroll.nMax) then x := Scroll.nMax;
+                          end;
+               SB_PAGEUP: begin
+                             x := x - y;
+                             if x < longint(Scroll.nMin) then x := Scroll.nMin;
+                          end;
+               SB_PAGEDOWN: begin
+                             x := x + y;
+                             if x > longint(Scroll.nMax) then x := Scroll.nMax;
+                          end;
+               SB_THUMBTRACK: x := HiWord(wParam);
+               end; // case
+//         MessageBox(0,pchar(tostr(x)),'aaaa',mb_ok);
+               SetScrollPos(lParam,SB_CTL,x,true);
+               if GetProp(lParam,'fw_cbf1') <> 0 then
+               begin
+                  ip := pointer(GetProp(lParam,'fw_cbf2'));
+                  if dword(ip) <> 0 then ip^ := x;
+               end;
+               if GetProp(lParam,'fw_cbf1') <> 0 then
+               begin
+                  pr := pointer(GetProp(lParam,'fw_cbf1'));
+                  pr;
+               end;
+
+
+        end; // Scroll <> nil
+      end;
+
+
+
+
+   end; { case }
+
+    if res = 0 then res := DefWindowProc(aWindow, AMessage, WParam, LParam);
+    _WindowProc := res;
+end;
+
+
+
+function  _StartWindows:dword;
+var
+   wc     : WNDCLASS;
+   Res    : dword;
+begin
+
+
+   Res := 0;
+
+   {// Set up and register window class }
+
+   wc.style := CS_HREDRAW or CS_VREDRAW or CS_OWNDC;
+{$IFDEF FPC}
+   wc.lpfnWndProc := WndProc(@_WindowProc);
+{$ELSE}
+   wc.lpfnWndProc := @_WindowProc;
+{$ENDIF}
+   wc.cbClsExtra := 0;
+   wc.cbWndExtra := 0;
+   wc.hInstance := GetModuleHandle(nil); {system.MainInstance; } {hInst; }
+   wc.hIcon := LoadIcon(0, 'MAINICON');
+   wc.hCursor := LoadCursor(0, IDC_ARROW);
+   wc.hbrBackground := COLOR_BTNFACE + 1;
+   wc.lpszMenuName := nil;
+   wc.lpszClassName := 'wincore125';
+   if RegisterClass(wc) <> 0 then
+   begin
+   {// Create a window }
+
+      h_Wnd := CreateWindow('wincore125','WndSys',
+                           WS_POPUP or WS_VISIBLE or WS_CAPTION or WS_SYSMENU or WS_BORDER,
+                           -1,
+                           -1,
+                           100,
+                           100,
+                           0,
+                           0,
+                           0,
+                           nil);
+
+      if h_Wnd <> 0 then
+      begin
+         wnd := h_wnd;
+         ShowWindow(h_Wnd, SW_SHOW);
+         UpdateWindow(h_Wnd);
+         SetFocus(h_Wnd);
+         aCursor := 1;
+       { set up GDI }
+         Res := 1; { OK }
+      end;
+   end;
+   _StartWindows := Res;
+end;
+
+
+// WARNING use carefuly allways call ExitWindows;
+
+function EnterWindows:dword;
+begin
+   EnterW := 0;
+//   WithThread := false;
+   if _StartWindows = 1 then
+   begin
+      __init_all;
+      FlushMessages;
+      EnterW := 1;
+   end else begin
+      error(1);
+   end;
+   EnterWindows := EnterW;
+end;
+
+
+
+Procedure LeaveWindows;
+var
+  aMSG : MSG;
+begin
+   if EnterW = 1 then
+   begin
+//      delay(15); I do not need that
+      PostMessage(h_wnd,WM_CLOSE,0,0);
+{$IFDEF FPC}
+      while GetMessage(@amsg,0, 0, 0) do
+      begin
+         TranslateMessage(@amsg);
+         DispatchMessage(@amsg);
+{$ELSE}
+      while GetMessage(amsg,0, 0, 0) do
+      begin
+         TranslateMessage(amsg);
+         DispatchMessage(amsg);
+{$ENDIF}
+      end;
+      __close_all;
+      EnterW := 0;
+   end;
+end;
+
+
+procedure RunFlatWindows(callproc:dword);
+begin
+   if EnterW = 1 then
+   begin
+      error(2);
+      Exit;
+   end;
+   if callproc = 0 then Exit;
+   mainproc := pointer(callproc);
+   if EnterWindows = 1 then
+   begin
+      mainproc;
+      LeaveWindows
+   end;
+end;
+
+
+procedure Run;  
+var
+  aMSG : MSG;
+begin
+   if EnterW = 1 then
+   begin
+      while true do
+      begin
+{$IFDEF FPC}
+         if PeekMessage(@amsg,0,0,0,PM_NOREMOVE or PM_NOYIELD) = true then
+{$ELSE}
+         if PeekMessage(amsg,0,0,0,PM_NOREMOVE or PM_NOYIELD) = true then
+{$ENDIF}
+         begin
+            if amsg.message = WM_QUIT then
+            begin
+               // a normal WM_quit before WM_CLOSE
+               // this outside message to me
+{$IFDEF FPC}
+               GetMessage(@amsg,0,0,0); // to clear WM_QUIT
+{$ELSE}
+               GetMessage(amsg,0,0,0); // to clear WM_QUIT
+{$ENDIF}
+               PostMessage(h_wnd,WM_CLOSE,0,0);
+               BREAK;
+            end;
+            if amsg.message = WM_CLOSE then BREAK;
+            if amsg.message = WM_DESTROY then BREAK;
+{$IFDEF FPC}
+            if GetMessage(@amsg,0,0,0) = true then
+            begin
+               TranslateMessage(@amsg);
+               DispatchMessage(@amsg);
+{$ELSE}
+            if GetMessage(amsg,0,0,0) = true then
+            begin
+               TranslateMessage(amsg);
+               DispatchMessage(amsg);
+{$ENDIF}
+            end;
+         end else begin
+            { OnIdle; }
+            OnIdle;
+         end;
+      end;
+      __close_all;
+      EnterW := 0;
+   end else begin
+      error(3);
+   end;
+end;
+
+
+Procedure ExitProgram;  
+begin
+   PostMessage(h_wnd,WM_CLOSE,0,0);
+   { ! WARNING !
+      You must use onQUIT to stop DX or something else
+   }
+end;
+
+
+(*//////////////////////////////////////////////////////////////////////////////
+////////////////////////////////////////////////////////////////////////////////
+///  WNDSYS (WMTLS)     versin 1.2      last touch 01.02.2005
+///
+///  < <    W I N D O W    M E N A G M E N T    T O O L S    > >
+///
+
+
+export
+   GetWndMessage,
+   GetPaintHdc,
+   GetHWnd,
+   SetWndHook,
+   SetCaption,
+   SetWindowPosition,
+   SetWindowSize,
+   SetWindowClientSize,
+   SetWindowMaximaze,
+   SetWIndowBorder,
+   SetWindowCursor,
+   SetWindowIcon,
+   SetWindowBackground,
+   GetScreenXlng,
+   GetScreenYlng,
+   GetScreenBPP,
+
+to implementation
+
+function  GetWndMessage(a:dword):dword;
+ external 'wndsys.dll' name 'GetWndMessage';
+
+function  GetPaintHdc:HDC;
+ external 'wndsys.dll' name 'GetPaintHdc';
+
+function  GetHWnd:HWND;
+ external 'wndsys.dll' name 'GetHWnd';
+
+procedure SetWndHook(hooknum,hookptr:dword);
+ external 'wndsys.dll' name 'SetWndHook';
+
+procedure SetWindowCaption(Caption:pchar);
+ external 'wndsys.dll' name 'SetWindowCaption';
+
+procedure SetWindowPosition(Xpos,Ypos:longint);
+ external 'wndsys.dll' name 'SetWindowPosition';
+
+procedure SetWindowSize(Xlng,Ylng:longint);
+ external 'wndsys.dll' name 'SetWindowSize';
+
+procedure SetWindowClientSize(Width,Height:longint);
+ external 'wndsys.dll' name 'SetWindowClientSize';
+
+procedure SetWindowMaximaze;
+ external 'wndsys.dll' name 'SetWindowMaximaze';
+
+procedure SetWindowBorder(Border:dword);
+ external 'wndsys.dll' name 'SetWIndowBorder';
+
+procedure SetWindowCursor(Cursor:dword);
+ external 'wndsys.dll' name 'SetWindowCursor';
+
+procedure SetWindowIcon(Icon:Dword);
+ external 'wndsys.dll' name 'SetWindowIcon';
+
+procedure SetWindowBackground(BK:Dword);
+ external 'wndsys.dll' name 'SetWindowBackground';
+
+function  GetScreenXlng:dword;
+ external 'wndsys.dll' name 'GetScreenXlng';
+
+function  GetScreenYlng:dword;
+ external 'wndsys.dll' name 'GetScreenYlng';
+
+function  GetScreenBPP:dword;
+ external 'wndsys.dll' name 'GetScreenBPP';
+
+
+*)
+
+function GetWndMessage(a:dword):dword;
+var res:dword;
+begin
+  res := 0;
+  if a = 0 then res := cmd_m;                  { Message   }
+  if a = 1 then res := cmd_h;                  { HWND      }
+  if a = 2 then res := cmd_w;                  { Wparam    }
+  if a = 3 then res := cmd_d;                  { Lparam    }
+  if a = 4 then res := cmd_w and $FF;          {LO Wparam  }
+  if a = 5 then res :=(cmd_w shr 8) and $FF;   {HI Wparam  }
+  if a = 6 then res := cmd_d and $FFFF;        {LO Lparam  }
+  if a = 7 then res :=(cmd_d shr 16) and $FFFF;{HI Lparam  }
+  GetWndMessage := res;
+end;
+
+
+function GetPaintHdc:HDC;  
+begin
+  GetPaintHdc := pdc;
+end;
+
+
+function GetHWnd:HWND;
+begin
+  GetHwnd := H_wnd;
+end;
+
+
+procedure SetWndHook(hooknum,hookptr:dword);
+begin
+   if hooknum = 0 then
+     if hookptr = 0 then onIdle  := @nopProc else onIdle  := pointer(hookptr);
+   if hooknum = 1 then
+     if hookptr = 0 then onMouse := @nopProc else onMouse := pointer(hookptr);
+   if hooknum = 2 then
+     if hookptr = 0 then onKey   := @nopProc else onKey   := pointer(hookptr);
+   if hooknum = 3 then
+     if hookptr = 0 then onTimer := @nopProc else onTimer := pointer(hookptr);
+   if hooknum = 4 then
+     if hookptr = 0 then onQuit  := @nopProc else onQuit  := pointer(hookptr);
+   if hooknum = 5 then
+     if hookptr = 0 then onPaint := @nopProc else onPaint := pointer(hookptr);
+   if hooknum = 6 then
+     if hookptr = 0 then onClick := @nopProc else onClick := pointer(hookptr);
+   if hooknum = 7 then
+     if hookptr = 0 then onActive := @nopProc else onActive := pointer(hookptr);
+   if hooknum = 8 then
+     if hookptr = 0 then onDeActive := @nopProc else onDeActive := pointer(hookptr);
+   if hooknum = 9 then
+     if hookptr = 0 then onCommand := @nopProc else onCommand := pointer(hookptr);
+   if hooknum = 10 then
+     if hookptr = 0 then onCreate := @nopProc else onCreate := pointer(hookptr);
+   if hooknum = 11 then
+     if hookptr = 0 then onSize := @nopProc else onSize := pointer(hookptr);
+   if hooknum = 12 then
+     if hookptr = 0 then onOther := @nopProc else onOther := pointer(hookptr);
+
+end;
+
+
+procedure SetWindowCaption(Caption:pchar);
+begin
+   if wnd <> 0 then SetWindowText(h_wnd,pchar(Caption));
+end;
+
+
+procedure SetWindowPosition(Xpos,Ypos:longint);
+var r:TRECT;
+    xl,yl:longint;
+begin
+   if wnd <> 0 then
+   begin
+      GetWindowRect(wnd, r);
+//todo + 1 in size ??????????
+      xl := r.right - r.left;
+      yl := r.bottom - r.top;
+
+      if (Xpos = -1) and (Ypos = -1) then
+      begin
+         Xpos := (GetSystemMetrics(SM_CXSCREEN) - xl) div 2;
+         Ypos := (GetSystemMetrics(SM_CYSCREEN) - yl) div 2;         
+      end;
+      MoveWindow(wnd, Xpos, Ypos, xl, yl, TRUE);
+   end;
+end;
+
+procedure SetWindowSize(Xlng,Ylng:longint);
+var r:TRECT;
+begin
+   if wnd <> 0 then
+   begin
+      GetWindowRect(wnd, r);
+      MoveWindow(wnd, r.Left, r.Top, Xlng, Ylng, TRUE);
+   end;
+end;
+
+
+procedure SetWindowClientSize(Width,Height:longint);
+var rectWindow ,rectClient:trect;
+begin
+  if wnd <> 0 then begin
+     Windows.GetWindowRect(wnd, rectWindow );
+     Windows.GetClientRect(wnd, rectClient);
+     Width := ((rectWindow.Right  - rectWindow .Left) - rectClient.Right) + longint(Width);
+     Height:= ((rectWindow.Bottom - rectWindow .Top)  - rectClient.Bottom) + longint(Height);
+     SetWindowPos(wnd, 0, 0, 0, Width, Height, SWP_NOZORDER or SWP_NOMOVE);
+  end;
+end;
+
+
+procedure GetWindowClientSize(var Width,Height:longint);
+var rectClient:trect;
+begin
+  Width := 0;
+  Height := 0;
+  if wnd <> 0 then begin
+     Windows.GetClientRect(wnd, rectClient);
+     Width := rectClient.Right;
+     Height := rectClient.Bottom;
+  end;
+end;
+
+
+procedure SetWindowMaximaze;
+begin
+   if wnd <> 0 then ShowWindow(wnd, SW_SHOWMAXIMIZED);
+end;
+
+
+procedure SetWindowBorder(Border:dword);
+var st:dword;
+begin
+   if wnd <> 0 then
+   begin
+      st   := GetWindowLong(wnd, GWL_STYLE);
+
+      st := st and (not (WS_POPUP or WS_CAPTION or WS_BORDER
+                    or WS_THICKFRAME or WS_DLGFRAME or DS_MODALFRAME or WS_MINIMIZEBOX or WS_MAXIMIZEBOX));
+      case Border of
+      0: { None } st := st or WS_POPUP;
+      1: { Single } st := st or (WS_CAPTION or WS_BORDER);
+      2: { Sizeble } st := st or (WS_CAPTION or WS_THICKFRAME or WS_MINIMIZEBOX or WS_MAXIMIZEBOX);
+      end;
+
+      SetWindowLong(wnd,GWL_STYLE, st);
+      { now update changes to border }
+      SetWindowPos(wnd,0,0,0,0,0,
+           SWP_NOMOVE or SWP_NOSIZE or SWP_NOZORDER or SWP_FRAMECHANGED);
+   end;
+end;
+
+
+procedure SetWindowCursor(Cursor:dword);  
+begin
+   aCursor := Cursor;
+   if Cursor = 0 then SetCursor(0);
+   if Cursor = 1 then SetCursor(LoadCursor(0,IDC_ARROW));
+   if Cursor = 2 then SetCursor(LoadCursor(0,MAKEINTRESOURCE(32649))); {IDC_HAND}{win95 not working }
+   if Cursor = 3 then SetCursor(LoadCursor(0,IDC_WAIT));
+   if Cursor = 4 then SetCursor(LoadCursor(0,IDC_CROSS));
+   if Cursor = 5 then SetCursor(LoadCursor(0,IDC_IBEAM));
+   if Cursor > 1024 then SetCursor(Cursor);
+end;
+
+
+procedure SetWindowIcon(Icon:Dword);
+var a,i:dword;
+begin
+   a := 0;
+   if wnd  <> 0 then
+   begin
+      // if Icon = 0 then None
+      if Icon = 1 then a := LoadIcon(0,IDI_APPLICATION);
+      if Icon = 2 then a := LoadIcon(0,IDI_HAND);
+      if Icon = 3 then a := LoadIcon(0,IDI_EXCLAMATION);
+      if Icon = 4 then a := LoadIcon(0,IDI_QUESTION);
+      if Icon = 5 then a := LoadIcon(0,IDI_ASTERISK);
+      if (Icon > 6) and (Icon < 1024) then
+      begin
+         i := ExtractIcon(0,'shell32.dll',dword(-1));
+         a := Icon - 6;
+         if a > i then a := 0;
+         a := ExtractIcon(0,'shell32.dll',a);
+      end;
+
+      if Icon > 1024 then a := Icon;
+      SetClassLong(wnd,GCL_HICON,a);
+   end;
+end;
+
+
+procedure SetWindowBackground(BK:Dword);
+var a:dword;
+begin
+   a := 0;
+   aBackGr := 0;
+   if wnd <> 0 then
+   begin
+      if (bk and $FF000000) <> 0 then
+      begin
+         bk := bk and $FF;
+         if bk = 0 then begin a := 0;  aBackGr := 1; end;
+         if bk = 1  then a := COLOR_BTNFACE + 1;
+         if bk = 2  then a := GetStockObject(BLACK_BRUSH);
+         if bk = 3  then a := GetStockObject(WHITE_BRUSH);
+      end else begin
+         // this is rgb
+         if aBrush <> 0 then DeleteObject(aBrush);
+         a := CreateSolidBrush(bk); { bk = rgb color }
+         aBrush := a;
+      end;
+      SetClassLong(wnd,GCL_HBRBACKGROUND,a);
+      InvalidateRect(wnd,nil,true);
+   end;
+end;
+
+
+function  GetScreenXlng:dword;
+begin
+   GetScreenXlng := GetSystemMetrics(SM_CXSCREEN);
+end;
+
+
+function  GetScreenYlng:dword;
+begin
+   GetScreenYlng := GetSystemMetrics(SM_CYSCREEN);
+end;
+
+
+function  GetScreenBPP:dword;
+var dc,r:dword;
+begin
+   r := 0;
+   dc := CreateCompatibleDC(0);
+   if dc <> 0 then
+   begin
+      r := GetDeviceCaps(dc,BITSPIXEL);
+      DeleteDC(dc);
+   end;
+   GetScreenBPP := r;
+end;
+
+procedure RePaintWindow;
+begin
+   InvalidateRect(h_wnd,nil,false);
+end;
+
+
+
+
+
+(*//////////////////////////////////////////////////////////////////////////////
+////////////////////////////////////////////////////////////////////////////////
+/// WNDSYS (KEYBD)   version 2.5a     last touch 01.02.2005
+///
+///  < <    K E Y B O A R D    D R I V E R    > >
+
+export
+         KeyHit,
+         TestKey,
+         KeyPressed,
+         GetKey,
+         WaitKeyGet,
+         WaitKey,
+         FlushKeys,
+
+to implementation
+
+FUNCTION  KeyHit(VK:dword):dword; 
+ external 'wndsys.dll' name 'KeyHit';
+
+FUNCTION  TestKey(akey:dword):boolean;
+ external 'wndsys.dll' name 'TestKey';
+
+FUNCTION  KeyPressed:boolean;
+ external 'wndsys.dll' name 'KeyPressed';
+
+FUNCTION  GetKey:word;
+ external 'wndsys.dll' name 'GetKey';
+
+FUNCTION  WaitKeyGet:word;
+ external 'wndsys.dll' name 'WaitKeyGet';
+
+PROCEDURE WaitKey;
+ external 'wndsys.dll' name 'WaitKey';
+
+PROCEDURE FlushKeys;
+ external 'wndsys.dll' name 'FlushKeys';
+
+
+*)
+
+
+// Window implementation
+function TestKey(akey:dword):boolean;
+begin
+   FlushMessages;
+   TestKey := iostr.keyscanmap[akey and $7F] <> 0;
+end;
+
+
+function KeyPressed:boolean;
+begin
+   FlushMessages;
+   KeyPressed := iostr.kbdBegin <> iostr.kbdEnd;
+end;
+
+
+function GetKey:word;
+var w:word;
+begin
+   FlushMessages;
+   w:=0;
+   if iostr.kbdBegin <> iostr.kbdEnd then
+   begin
+      w:=iostr.kbdBuff[iostr.kbdEnd];
+      iostr.kbdEnd := (iostr.kbdEnd + 1) and 31;
+   end;
+   GetKey := w;
+end;
+
+
+procedure FlushKeys;
+var i:integer;
+begin
+   for i := 0 to 128 do iostr.keyscanmap[i] := 0;
+   iostr.keyhitc := 0;
+   iostr.kbdBegin := 0;
+   iostr.kbdEnd := 0;
+end;
+
+
+
+
+procedure _KEYBD_init;
+var i:integer;
+begin
+   iostr.kbdBegin := 0;
+   iostr.kbdEnd := 0;
+   for i := 0 to 128 do iostr.keyscanmap[i] := 0;
+   iostr.keyhitc := 0;
+end;
+
+{
+// export part
+function TestKey(akey:dword):boolean;
+begin
+   TestKey := InputFunc._TestKey(akey);
+end;
+
+
+function KeyPressed:boolean;
+begin
+   KeyPressed := InputFunc._KeyPressed;
+end;
+
+
+function GetKey:word;
+begin
+   GetKey := InputFunc._GetKey;
+end;
+
+
+procedure FlushKeys;
+begin
+   InputFunc._FlushKeys;
+end;
+}
+
+function  WaitKeyGet:word;
+begin
+   repeat until KeyPressed;
+   WaitKeyGet := GetKey;
+end;
+
+
+procedure WaitKey;
+//var w:word;
+begin
+//   w:=WaitKeyGet;
+   WaitKeyGet;
+end;
+
+
+/// Asinhron read state
+(*
+Symbolic constant name Value
+(hexadecimal) Mouse or keyboard equivalent
+VK_LBUTTON        01   Left mouse button
+VK_RBUTTON        02   Right mouse button
+VK_CANCEL         03   Control-break processing
+VK_MBUTTON        04   Middle mouse button (three-button mouse)
+VK_XBUTTON1       05   Windows 2000/XP: X1 mouse button
+VK_XBUTTON2       06   Windows 2000/XP: X2 mouse button
+—                 07   Undefined
+VK_BACK           08   BACKSPACE key
+VK_TAB            09   TAB key
+—               0A–0B  Reserved
+VK_CLEAR          0C   CLEAR key
+VK_RETURN         0D   ENTER key
+—               0E–0F  Undefined
+VK_SHIFT          10   SHIFT key
+VK_CONTROL        11   CTRL key
+VK_MENU           12   ALT key
+VK_PAUSE          13   PAUSE key
+VK_CAPITAL        14   CAPS LOCK key
+-                 -    kanji kodes
+—                 1A   Undefined
+VK_ESCAPE         1B   ESC key               1
+VK_CONVERT        1C   IME convert
+VK_NONCONVERT     1D   IME nonconvert
+VK_ACCEPT         1E   IME accept
+VK_MODECHANGE     1F   IME mode change request
+VK_SPACE          20   SPACEBAR
+VK_PRIOR          21   PAGE UP key
+VK_NEXT           22   PAGE DOWN key
+VK_END            23   END key
+VK_HOME           24   HOME key
+VK_LEFT           25   LEFT ARROW key        75
+VK_UP             26   UP ARROW key          72(dec) scan code
+VK_RIGHT          27   RIGHT ARROW key       77
+VK_DOWN           28   DOWN ARROW key        80
+VK_SELECT         29   SELECT key
+VK_PRINT          2A   PRINT key
+VK_EXECUTE        2B   EXECUTE key
+VK_SNAPSHOT       2C   PRINT SCREEN key
+VK_INSERT         2D   INS key
+VK_DELETE         2E   DEL key
+VK_HELP           2F   HELP key
+ 30 - 0 key ... 39 - 9 key
+—  3A–40 Undefined
+ 41 - A key ... 5A - Z key
+VK_LWIN           5B   Left Windows key (Microsoft® Natural® keyboard)
+VK_RWIN           5C   Right Windows key (Natural keyboard)
+VK_APPS           5D   Applications key (Natural keyboard)
+—                 5E   Reserved
+VK_SLEEP          5F   Computer Sleep key
+VK_NUMPAD0        60   Numeric keypad 0 key
+VK_NUMPAD1        61   Numeric keypad 1 key
+VK_NUMPAD2        62   Numeric keypad 2 key
+VK_NUMPAD3        63   Numeric keypad 3 key
+VK_NUMPAD4        64   Numeric keypad 4 key
+VK_NUMPAD5        65   Numeric keypad 5 key
+VK_NUMPAD6        66   Numeric keypad 6 key
+VK_NUMPAD7        67   Numeric keypad 7 key
+VK_NUMPAD8        68   Numeric keypad 8 key
+VK_NUMPAD9        69   Numeric keypad 9 key
+VK_MULTIPLY       6A   Multiply key
+VK_ADD            6B   Add key
+VK_SEPARATOR      6C   Separator key
+VK_SUBTRACT       6D   Subtract key
+VK_DECIMAL        6E   Decimal key
+VK_DIVIDE         6F   Divide key
+VK_F1             70   F1 key
+VK_F2             71   F2 key
+VK_F3             72   F3 key
+VK_F4             73   F4 key
+VK_F5             74   F5 key
+VK_F6             75   F6 key
+VK_F7             76   F7 key
+VK_F8             77   F8 key
+VK_F9             78   F9 key
+VK_F10            79   F10 key
+VK_F11            7A   F11 key
+VK_F12            7B   F12 key
+VK_F13            7C - F13 key ...  VK_F24 87H - F24 key
+—  88–8F Unassigned
+VK_NUMLOCK        90   NUM LOCK key
+VK_SCROLL         91   SCROLL LOCK key
+                92–96  OEM specific
+—               97–9F  Unassigned
+VK_LSHIFT         A0   Left SHIFT key
+VK_RSHIFT         A1   Right SHIFT key
+VK_LCONTROL       A2   Left CONTROL key
+VK_RCONTROL       A3   Right CONTROL key
+VK_LMENU          A4   Left MENU key
+VK_RMENU          A5   Right MENU key
+*)
+
+{use VkKeyScan('w') for letters}
+function KeyHit(VK:dword):dword;  
+begin
+  FlushMessages;
+  KeyHit := dword((GetAsyncKeyState(VK) and 1) = 1);
+end;
+
+
+(*//////////////////////////////////////////////////////////////////////////////
+////////////////////////////////////////////////////////////////////////////////
+///  WNDSYS  (MOUSE)   version 2.6      last touch 01.02.2005
+///
+///   < <    M O U S E    D R I V E R    > >
+
+
+export
+         Mouse_GetXpos,
+         Mouse_GetYpos,
+         Mouse_GetButtons,
+         Mouse_Get,
+         Mouse_GetDiff,
+
+
+to implementation
+
+FUNCTION  Mouse_GetXpos:dword;
+ external 'wndsys.dll' name 'Mouse_GetXpos';
+
+FUNCTION  Mouse_GetYpos:dword;
+ external 'wndsys.dll' name 'Mouse_GetYpos';
+
+FUNCTION  Mouse_GetButtons:dword;
+ external 'wndsys.dll' name 'Mouse_GetButtons';
+
+PROCEDURE Mouse_Get(var Buttons,Xpos,Ypos:dword);
+ external 'wndsys.dll' name 'Mouse_Get';
+
+PROCEDURE Mouse_GetDiff(var Xdif,Ydif:dword);
+ external 'wndsys.dll' name 'Mouse_GetDiff';
+
+
+*)
+
+procedure _MOUSE_init;
+begin
+   iostr.msd_buttons := 0;
+   iostr.msd_Xpos := 0;
+   iostr.msd_Ypos := 0;
+   iostr.msd_Xdiff := 0;
+   iostr.msd_Ydiff := 0;
+end;
+
+
+function  Mouse_GetXpos:dword;
+begin
+   FlushMessages;
+   Mouse_GetXpos := iostr.msd_Xpos;
+end;
+
+
+function  Mouse_GetYpos:dword;
+begin
+   FlushMessages;
+   Mouse_GetYpos := iostr.msd_Ypos;
+end;
+
+
+function  Mouse_GetButtons:dword;
+begin
+   FlushMessages;
+   Mouse_GetButtons := iostr.msd_Buttons;
+end;
+
+
+procedure Mouse_Get(var Buttons,Xpos,Ypos:dword);
+begin
+   FlushMessages;
+   Buttons := iostr.msd_Buttons;
+   Xpos := iostr.msd_Xpos;
+   Ypos := iostr.msd_Ypos;
+end;
+
+
+procedure Mouse_GetDiff(var Xdif,Ydif:longint);
+begin
+   FlushMessages;
+   Xdif := iostr.msd_Xdiff;
+   Ydif := iostr.msd_Ydiff;
+   iostr.msd_Xdiff := 0; { after get clear }
+   iostr.msd_Ydiff := 0;
+end;
+
+
+{
+function  Mouse_GetXpos:dword;
+begin
+   Mouse_GetXpos := InputFunc._Mouse_GetXpos;
+end;
+
+
+function  Mouse_GetYpos:dword;
+begin
+   Mouse_GetYpos := InputFunc._Mouse_GetYpos;
+end;
+
+
+function  Mouse_GetButtons:dword;
+begin
+   Mouse_GetButtons := InputFunc._Mouse_GetButtons;
+end;
+
+
+procedure Mouse_Get(var Buttons,Xpos,Ypos:dword);
+begin
+   InputFunc._Mouse_Get(Buttons,Xpos,Ypos);
+end;
+
+
+procedure Mouse_GetDiff(var Xdif,Ydif:longint);
+begin
+   InputFunc._Mouse_GetDiff(Xdif,Ydif);
+end;
+}
+
+procedure Mouse_SetPosition(Xpos,Ypos:dword);
+begin
+   SetCursorPos(Xpos, Ypos);
+end;
+
+
+
+
+
+procedure __Init_All;
+begin
+   winDC := 0;
+   // keyboard
+   _KEYBD_init;
+//   InputFunc._TestKey := @W_TestKey;
+//   InputFunc._KeyPressed := @W_KeyPressed;
+//   InputFunc._GetKey := @W_GetKey;
+//   InputFunc._FlushKeys := @W_FlushKeys;
+
+   // mouse
+   _MOUSE_init;
+//   InputFunc._Mouse_GetXpos := @W_Mouse_GetXpos;
+//   InputFunc._Mouse_GetYpos := @W_Mouse_GetYpos;
+//   InputFunc._Mouse_GetButtons := @W_Mouse_GetButtons;
+//   InputFunc._Mouse_Get := @W_Mouse_Get;
+//   InputFunc._Mouse_GetDiff := @W_Mouse_GetDiff;
+end;
+
+procedure __Close_All;
+begin
+   if aBrush <> 0 then DeleteObject(aBrush);
+   if winDC <> 0 then ReleaseDC(h_wnd,winDC);
+end;
+
+
+////////////////////////////////////////////////////////////////////////////////
+
+function Button(Xpos,Ypos,Xlng,Ylng:dword; BtnName: string; BtnProc:proc):dword;
+var res,cid:dword;
+begin
+   BtnName := BtnName + #0;
+   cid := 1;
+   res := CreateWindowEx(0,
+                   'Button',
+                   PCHAR(BtnName),
+                   WS_CHILD or WS_VISIBLE or BS_PUSHBUTTON,
+                   Xpos, Ypos,
+                   Xlng, Ylng,
+                   wnd,
+                   hmenu(cid),
+                   0,nil);
+   if res <> 0 then
+   begin
+     SetProp(res,'fw_cbf1',dword(@BtnProc));
+     SetFocus(wnd);
+   end;
+   Button := res;
+end;
+
+function  EditBox(Xpos,Ypos,Xlng,Ylng:dword; InitText: string; aText:ptrtostring):dword;
+var res,cid:dword;
+begin
+   InitText := InitText + #0;
+   cid := 5;
+   res := CreateWindowEx(0,
+                   'edit',
+                   PCHAR(InitText),
+                   WS_CHILD or WS_VISIBLE or ES_AUTOHSCROLL or ES_LEFT or WS_BORDER,
+                   Xpos, Ypos,
+                   Xlng, Ylng,
+                   wnd,
+                   hmenu(cid),
+                   0,nil);
+   if res <> 0 then
+   begin
+     SetProp(res,'fw_cbf1',dword(aText));
+     SetFocus(res);
+   end;
+   EditBox := res;
+end;
+
+function CheckBox(Xpos,Ypos,Xlng,Ylng:dword; BtnName: string; BoolPtr:ptrtobool; InitValue:boolean):dword;
+var res,cid:dword;
+begin
+   BtnName := BtnName + #0;
+   cid := 2;
+   res := CreateWindowEx(0,
+                   'Button',
+                   PCHAR(BtnName),
+                   WS_CHILD or WS_VISIBLE or BS_AUTOCHECKBOX,
+                   Xpos, Ypos,
+                   Xlng, Ylng,
+                   wnd,
+                   hmenu(cid),
+                   0,nil);
+   if res <> 0 then
+   begin
+     SetProp(res,'fw_cbf1',dword(BoolPtr));
+     SetFocus(wnd);
+     if InitValue then SendMessage(res,BM_SETCHECK,BST_CHECKED,0);
+     if BoolPtr <> nil then BoolPtr^ := InitValue;
+   end;
+   CheckBox := res;
+end;
+
+
+function LabelBox(Xpos,Ypos,Xlng,Ylng:dword; BtnName: string):dword;
+var res,cid:dword;
+begin
+   BtnName := BtnName + #0;
+   cid := 3;
+   res := CreateWindowEx(0,
+                   'Static',
+                   PCHAR(BtnName),
+                   WS_CHILD or WS_VISIBLE or SS_LEFT,
+                   Xpos, Ypos,
+                   Xlng, Ylng,
+                   wnd,
+                   hmenu(cid),
+                   0,nil);
+   if res <> 0 then
+   begin
+     SetFocus(wnd);
+   end;
+   LabelBox := res;
+end;
+
+
+function ScrollBar(Xpos,Ypos,Xlng,Ylng,Min,Max,Pos,HV:longint; BtnProc:proc; IntPtr:ptrtoint):dword;
+var res,cid:dword;
+    HVt:dword;
+begin
+ //  BtnName := BtnName + #0;
+   HVt := SBS_VERT;
+   if HV = 1 then HVt := SBS_HORZ;
+   cid := 3;
+   res := CreateWindowEx(0,
+                   'scrollbar',
+                   PCHAR(''),
+                   WS_CHILD or WS_VISIBLE or HVt,
+                   Xpos, Ypos,
+                   Xlng, Ylng,
+                   wnd,
+                   hmenu(cid),
+                   0,nil);
+   if res <> 0 then
+   begin
+     SetProp(res,'fw_cbf1',dword(@BtnProc));
+     SetProp(res,'fw_cbf2',dword(IntPtr));
+
+     SetScrollRange(res,SB_CTL,Min,Max,true);
+     SetScrollPos(res,SB_CTL,Pos,True);
+
+     SetFocus(wnd);
+   end;
+   ScrollBar := res;
+
+end;
+
+
+procedure ControlText(Hand:dword; NewText: string);
+begin
+   NewText := NewText + #0;
+   SetWindowText(Hand,pchar(NewText));
+   InvalidateRect(Wnd,nil,true);
+   UpdateWindow(Wnd);
+end;
+
+{$IFDEF USE_BCANVAS}
+function  CreateDrawCanvas(Xpos,Ypos,Xlng,Ylng:longint; Framed:boolean; FrameColor:dword):BTCanvas;
+var DC:longword;
+    bmp:BTBitmap;
+    can : BTCanvas;
+    Draw , dd: PDrawControl;
+begin
+    can := nil;
+    GetMem(Draw,sizeof(DrawControl)) ;
+    if Draw <> nil then
+    begin
+       Draw.Next := nil;
+       Draw.bmp := BTBitmap.Create;
+       dc := CreateCompatibleDC(0);
+       Draw.bmp.Init(Xlng,Ylng,GetDeviceCaps(DC, BITSPIXEL),nil);
+       DeleteDC(dc);
+       Draw.Xpos := Xpos;
+       Draw.Ypos := Ypos;
+       FrameColor := FrameColor and $FFFFFF;
+       if Framed then FrameColor := FrameColor or $80000000;
+       Draw.frm := FrameColor;
+       InvalidateRect(h_wnd,nil,false);
+       can := Draw.bmp.Canvas;
+       if Draws = nil then
+       begin
+          Draws := Draw;
+       end else begin
+          dd := Draws;
+          while (dd.Next <> nil) do dd := dd.Next;
+          dd.Next := Draw;
+       end;
+    end;
+    CreateDrawCanvas := can;
+end;
+{$ENDIF}
+
+
+{$IFDEF USE_LOCALTIMER}
+function BeginTimer(Time_delay:dword):dword;
+begin
+   BeginTimer := GetTickCount + Time_delay;
+end;
+
+procedure WaitTimer(The_timer:dword);
+var amsg : MSG;
+begin
+   while GetTickCount < The_timer do // T = 0; was
+   begin
+{$IFDEF FPC}
+      if GetMessage(@amsg,0,0,0) = true then
+      begin
+         TranslateMessage(@amsg);
+         DispatchMessage(@amsg);
+{$ELSE}
+      if GetMessage(amsg,0,0,0) = true then
+      begin
+         TranslateMessage(amsg);
+         DispatchMessage(amsg);
+{$ENDIF}
+      end;
+   end;
+end;
+
+procedure Delay(Delay_time:dword);
+var t:dword;
+begin
+   t := BeginTimer(Delay_time);
+   WaitTimer(t);
+end;
+{$ENDIF}
+
+
+
+Initialization
+
+   EnterW := 0;
+   h_wnd := 0;
+   wnd := 0;
+   AppActive := true;
+   Finish    := false;
+   aBackGr   := 0;
+   aBrush := 0;
+//todo   libFmod := 0;
+
+   // INIT call back functions
+   OnIdle := @nopProc;
+   OnMouse := @nopProc;
+   OnKey := @nopProc;
+   OnTimer := @nopProc;
+   OnQuit := @nopProc;
+   OnPaint := @nopProc;
+   OnClick := @nopProc;
+   OnActive := @nopProc;
+   OnDeActive := @nopProc;
+   OnCommand := @nopProc;
+   OnCreate := @nopProc;
+   OnOther := @nopProc;
+   OnSize := @nopProc;
+{$IFDEF USE_BCANVAS}
+   Draws := nil;
+{$ENDIF}   
+//todo   The_Display.RePaint := @nopProc;
+//todo   The_Display.Destroy := @nopProc;
+Finalization
+
+end.
