@@ -9,11 +9,11 @@ type  BTComPort = class
             res:string;
             rescnt :longword;
             aCallBack:pointer;
-            aUserData:longword;
+            aUserData:NativeUInt;
             aTermChar:char;
             aConnected :boolean;
             Response :byte;
-            aPort :longword;
+            aPort :NativeUint;
             dcb : TDCB;
             tms : TCOMMTIMEOUTS;
             thr : longword;
@@ -26,13 +26,14 @@ type  BTComPort = class
             constructor Create;
             destructor  Destroy; override;
             function    Open(ComPort:string; BaudRate, DataBits, Parity, StopBits:longword):longint;
-            procedure   SetHandler(TermChar:longword; CallBack:Pointer; UserData:longword);
+            procedure   SetHandler(TermChar:longword; CallBack:Pointer; UserData:NativeUInt);
+            function    Send(data:string):boolean;
             procedure   Close;
             property    Connected :boolean read aConnected;
             property    Received :string read res;
       end;
 
-      BTComPortCallBack = procedure(aCom:BTComPort; UserData:longword); stdcall;
+      BTComPortCallBack = procedure(aCom:BTComPort; UserData:NativeUInt); stdcall;
 
 function EnumComPorts(var Res:string):longint;
 
@@ -115,8 +116,7 @@ end;
 
 //------------------------------------------------------------------------------
 function    BTComPort.Open(ComPort:string; BaudRate, DataBits, Parity, StopBits:longword):longint;
-var wd:longword;
-    erb:boolean;
+var erb:boolean;
     d:longword;
     Ticks:longword;
 begin
@@ -366,11 +366,31 @@ begin
 end;
 
 //------------------------------------------------------------------------------
-procedure   BTComPort.SetHandler(TermChar:longword; CallBack:Pointer; UserData:longword);
+procedure   BTComPort.SetHandler(TermChar:longword; CallBack:Pointer; UserData:NativeUint);
 begin
    aTermChar := char(TermChar);
    aCallBack := Callback;
    aUserData := UserData;
+end;
+
+//------------------------------------------------------------------------------
+function    BTComPort.Send(data:string):boolean;
+var sa:ansistring;
+    j,k:longword;
+    p:pointer;
+begin
+   Result := false; //fail
+   if aConnected then
+   begin
+      sa := ansistring(data);
+      j := length(sa);
+      if j > 0 then
+      begin
+         p := @sa[1];
+         writeFile(aPort,p^,j,k,nil);
+         if k = j then Result := true;
+      end;
+   end;
 end;
 
 //------------------------------------------------------------------------------

@@ -41,8 +41,11 @@ type  BTDataPool = class  // ALL in 1   (Stack, Stream, ItemsList(TDB))
             procedure   WriteInteger(value:integer);
             procedure   WriteBoolean(value:boolean);
             procedure   WriteChar(value:char);
-            procedure   WriteAnsistring(const value:ansistring; addlen:boolean = true);
+            procedure   WriteAnsiChar(value:ansichar);
+            procedure   WriteWideChar(value:widechar);
+            procedure   WriteAnsiString(const value:ansistring; addlen:boolean = true);
             procedure   WriteString(const value:string; addlen:boolean = true);
+            procedure   WriteWideString(const value:widestring; addlen:boolean = true);
             procedure   WriteLine(const value:string);
             procedure   WriteData(data:pointer; size:longword);
 
@@ -55,8 +58,11 @@ type  BTDataPool = class  // ALL in 1   (Stack, Stream, ItemsList(TDB))
             function    ReadInteger:integer;
             function    ReadBoolean:boolean;
             function    ReadChar:char;
-            function    ReadAnsistring:ansistring;
-            function    ReadString:string;
+            function    ReadAnsiChar:ansichar;
+            function    ReadWideChar:widechar;
+            function    ReadAnsistring(len:longword=0):ansistring;
+            function    ReadString(len:longword=0):string;
+            function    ReadWideString(len:longword=0):widestring;
             function    ReadAnsiLine:ansistring;
             function    ReadLine:string;
             procedure   ReadData(data:pointer; size:longword);
@@ -78,7 +84,7 @@ type  BTDataPool = class  // ALL in 1   (Stack, Stream, ItemsList(TDB))
 
             // stack function
             procedure   PushData(Data:pointer; len:longword);
-            procedure   PopData(var Data:pointer; len:longword; refData:boolean=true);
+            procedure   PopData(var Data:pointer; var len:longword; refData:boolean=true);
             procedure   Push(Data:nativeUint);
             procedure   Pop(var Data:nativeUint);
 
@@ -143,7 +149,7 @@ procedure   BTDataPool.PushPosition;
 begin
    inc(aStackPos);
    if aStackPos > 128 then aStackPos := 128;
-   aStack[aStackPos]:=aPoolSize;
+   aStack[aStackPos]:=aPoolSize;              //todo
 end;
 
 //------------------------------------------------------------------------------
@@ -260,10 +266,23 @@ begin
    if value then WriteByte(1) else WriteByte(0);
 end;
 
+
 //------------------------------------------------------------------------------
 procedure   BTDataPool.WriteChar(value:char);
 begin
    WriteData(@value,sizeof(char));
+end;
+
+//------------------------------------------------------------------------------
+procedure   BTDataPool.WriteAnsiChar(value:ansichar);
+begin
+   WriteData(@value,sizeof(ansichar));
+end;
+
+//------------------------------------------------------------------------------
+procedure   BTDataPool.WriteWideChar(value:widechar);
+begin
+   WriteData(@value,sizeof(widechar));
 end;
 
 //------------------------------------------------------------------------------
@@ -278,6 +297,13 @@ procedure   BTDataPool.WriteString(const value:string; addlen:boolean = true);
 begin
    if addlen then WriteLongword(length(value));
    WriteData(@value[1],length(value)*sizeof(char));
+end;
+
+//------------------------------------------------------------------------------
+procedure   BTDataPool.WriteWideString(const value:widestring; addlen:boolean = true);
+begin
+   if addlen then WriteLongword(length(value));
+   WriteData(@value[1],length(value)*sizeof(widechar));
 end;
 
 //------------------------------------------------------------------------------
@@ -356,21 +382,42 @@ begin
 end;
 
 //------------------------------------------------------------------------------
-function    BTDataPool.ReadAnsistring:ansistring;
+function    BTDataPool.ReadAnsiChar:ansichar;
+begin
+   ReadData(@Result,sizeof(ansichar));
+end;
+
+//------------------------------------------------------------------------------
+function    BTDataPool.ReadWideChar:widechar;
+begin
+   ReadData(@Result,sizeof(widechar));
+end;
+
+//------------------------------------------------------------------------------
+function    BTDataPool.ReadAnsistring(len:longword=0):ansistring;
 var w:longword;
 begin
-   ReadData(@w,sizeof(longword));
+   if len = 0 then ReadData(@w,sizeof(longword)) else w:= len;
    Setlength(result,w);
    ReadData(@Result[1],w);
 end;
 
 //------------------------------------------------------------------------------
-function    BTDataPool.ReadString:string;
+function    BTDataPool.ReadString(len:longword=0):string;
 var w:longword;
 begin
-   ReadData(@w,sizeof(longword));
+   if len = 0 then ReadData(@w,sizeof(longword)) else w:= len;
    Setlength(result,w);
    ReadData(@Result[1],w*sizeof(char));
+end;
+
+//------------------------------------------------------------------------------
+function    BTDataPool.ReadWideString(len:longword=0):widestring;
+var w:longword;
+begin
+   if len = 0 then ReadData(@w,sizeof(longword)) else w:= len;
+   Setlength(result,w);
+   ReadData(@Result[1],w*sizeof(widechar));
 end;
 
 //------------------------------------------------------------------------------
@@ -725,20 +772,43 @@ end;
 //------------------------------------------------------------------------------
 procedure   BTDataPool.PushData(Data:pointer; len:longword);
 begin
+{
    if aStackOrigin = $FFFFFFFF then aStackOrigin := aPosition;  // first
    aStackOfs := aPosition;
-   WriteLongword(len);
+}
    WriteData(Data,len);
+   WriteLongword(len);
 end;
 
 //------------------------------------------------------------------------------
-procedure   BTDataPool.PopData(var Data:pointer; len:longword; refData:boolean=true);
+procedure   BTDataPool.PopData(var Data:pointer; var len:longword; refData:boolean=true);
 var l:longword;
 begin
    if refData then Data := nil;
+   if longint(aPosition-4) > 0 then
+   begin
+      dec(aPosition,4);
+      l := readlongword;
+      dec(aPosition,4);
+      if longint(aPosition-l) >= 0 then
+      begin
+         len := l;
+         if refData then
+         begin
+            Data := GetPtr(aPosition - Len);
+         end else begin
+            dec(aPosition,len);
+            ReadData(data,len);
+         end;
+         dec(aPosition,len);
+      end else begin
+         len := 0;
+      end;
+   end;
+{
+   if refData then Data := nil;
    if aStackOfs <> $FFFFFFFF then
    begin
-
       aPosition := aStackOfs;
       l := ReadLongword;
       if l <> len then Exit;
@@ -750,22 +820,25 @@ begin
          aStackOrigin := $FFFFFFFF;
          aStackPos := $FFFFFFFF;
       end;
-
    end;
+}
 end;
 
 //------------------------------------------------------------------------------
 procedure   BTDataPool.Push(Data:nativeUInt);
 begin
-   PushData(@Data,sizeof(nativeUInt));
+   WriteLongword(Data);
 end;
 
 //------------------------------------------------------------------------------
 procedure   BTDataPool.Pop(var Data:nativeUInt);
-var p:pointer;
 begin
-   p := @Data;
-   PopData(p,sizeof(nativeUInt),false);
+   if longint(aPosition-4) >= 0 then
+   begin
+      dec(aPosition,4);
+      Data := ReadLongword;
+      dec(aPosition,4);
+   end;
 end;
 
 

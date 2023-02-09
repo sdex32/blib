@@ -2,6 +2,9 @@ unit BdocxForms;
 
 interface
 
+//UNDER DEVELOPMENT
+
+
 type  BTDocxForms = class
          private
             aDocument:AnsiString;
@@ -23,7 +26,7 @@ type  BTDocxForms = class
             function    DeleteTableRow(TableID,TableRow:longword):boolean;
 
 //TODO
-//RepacePic
+//ReplacePic
 //data in table
 //Table delete or add ???? un used
          end;
